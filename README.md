@@ -31,6 +31,13 @@ if myClient:login('email', 'password') then
 	myClient:sendMessage('I can send messages!', channelList[1].id)
 
 	-- # general: VideahBot: I can send messages!
+	
+	myClient.on_message = function(channel, id, username, msg)
+	
+		if(msg == "test") then myClient:sendMessage("test!", channel)
+	end
+	
+	myClient:run()
 
 end
 ```
