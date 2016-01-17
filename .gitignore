@@ -41,3 +41,6 @@ luac.out
 
 /test.lua
 /key
+bot.lua
+fakeclient.lua
+fakeserver.lua

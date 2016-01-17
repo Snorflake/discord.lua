@@ -38,6 +38,13 @@ local Message = require(path .. 'message')
 print('Loaded client')
 
 local Client = class('ClientObject')
+local DS = require(path .. "datastore")
+
+--WEBSOCKET
+local ev = require'ev'
+local ws_client = require('websocket.client').ev()
+
+
 
 --- Internally initialize's the Client class.
 --- Please use Client:new(options) instead.
@@ -103,10 +110,6 @@ function Client:loginWithToken(token)
 end
 
 --- Logs the Client out of the Discord server.
---- (This is currently useless/does nothing)
--- @param email E-mail Address of the account to log in.
--- @param password Password of the account to log in.
--- (WARNING: Do NOT store this password in a GitHub repo or anything of the sorts.)
 -- @return True or False depending on success.
 function Client:logout()
 
@@ -116,7 +119,7 @@ function Client:logout()
 			token = self.token
 		}
 
-		local response = request.send(endpoints.login, 'POST', payload)
+		local response = request.send(endpoints.logout, 'POST', payload, self.headers)
 		local success = util.responseIsSuccessful(response)
 
 		if success then
@@ -281,20 +284,184 @@ function Client:deleteMessage(msgClass)
 
 end
 
+function Client:acceptInvite(id)
+	if self.isLoggedIn then
+		print(id,endpoints.invites .. "/" .. id)
+		local result = request.send(endpoints.invites .. "/" .. id, "POST", nil, self.headers)
+		for k, v in pairs(result) do print(k, v) end
+	
+	end
+end
+
+function Client:leaveGuild(id)
+	if self.isLoggedIn then
+		request.send(endpoints.servers .. "/" .. id, "DELETE", nil, self.headers)
+	end
+end
+
+function Client:getMessages(id, limit)
+	if self.isLoggedIn then	
+		--function requestWrapper.send(endpoint, method, data, headers)
+		local response = nil
+		if limit then
+		response = request.send(endpoints.channels .. "/" .. id .. "/messages?limit=" .. limit, "GET", nil, self.headers) else
+		response = request.send(endpoints.channels .. "/" .. id .. "/messages", "GET", nil, self.headers) end
+		local tbl = {}
+		for k, v in pairs(json.decode(response.body)) do 
+			tbl[k] = Message:new(v, self.token) 
+		end
+		
+		return tbl
+	end
+end
+
+
+
+local heartbeat = -1
+local wstoken = -1
+local clientinstance = nil
+
+local function keepalive()
+	ws_client:send(json.encode({ op = 1, d = os.time() * 1000 }))
+	--print("sent keepalive!")
+end
+
+local function handle_ready(tbl)
+	heartbeat = tbl.d.heartbeat_interval / 1000
+	print("Heartbeat interval: " .. heartbeat)
+
+
+		ev.Timer.new(function()
+				keepalive()
+		end,heartbeat,heartbeat):start(ev.Loop.default)
+		
+		clientinstance.pms = DS.fromList(tbl.d.private_channels, 'id', 'recipient.id')
+		
+		clientinstance.guildChannelLookup = {}
+		clientinstance.guilds = tbl.d.guilds
+		for i  = 1, #clientinstance.guilds do
+			local g = clientinstance.guilds[i]
+			
+			for i=1, #g.channels do
+				clientinstance.guildChannelLookup[g.channels[i].id] = g.id
+			end
+			
+			g.channels = DS.fromList(g.channels, "id", "name")
+			g.members = DS.fromList(g.members, "user.id", "user.username")
+			g.roles = DS.fromList(g.roles,"id", "name")
+		end
+		clientinstance.guilds = DS.fromList(clientinstance.guilds, "id", "name")
+
+end
+
+
+--I lioke the way luv-discord handles events so imma steal it
+local function noop() end
+local function popGuild(d)
+	local guild = clientinstance.guilds[d.guild_id]
+	d.guild_id = nil
+	return guild
+end
+
+local events =
+{
+	READY = noop,
+	
+	MESSAGE_CREATE = function(d) if clientinstance.on_message then  clientinstance.on_message(d.channel_id, d.author.id, d.author.username, d.content) end end,
+	
+	PRESENCE_UPDATE = noop,
+	USER_UPDATE = noop,
+	GUILD_CREATE = noop,
+	GUILD_DELETE = noop,
+	
+	CHANNEL_CREATE = function(d)
+		local channels = d.is_private and clientinstance.pms or popGuild(d).channels
+		DS.add(channels, d)
+	end,
+	CHANNEL_UPDATE = function(d)
+		local channels = d.is_private and clientinstance.pms or popGuild(d).channels
+		DS.update(channels, d.id, d)
+	end,	
+	CHANNEL_DELETE = function(d)
+		local channels = d.is_private and clientinstance.pms or popGuild(d).channels
+		DS.remove(channels, d.id)
+	end,
+	
+	GUILD_MEMBER_ADD = function(d)
+		local members = popGuild(d).members
+		DS.add(members,d)
+	end,	
+	GUILD_MEMBER_UPDATE = function(d)
+		local members = popGuild(d).members
+		DS.add(members,d.user.id, d)
+	end,	
+	GUILD_MEMBER_DELETE = function(d)
+		local members = popGuild(d).members
+		DS.add(members,d.user.id)
+	end,
+	GUILD_ROLE_CREATE = function(d)
+		local members = popGuild(d).roles
+		DS.add(members,d.role)
+	end,
+	GUILD_ROLE_UPDATE = function(d)
+		local members = popGuild(d).roles
+		DS.update(members,d.role.id, d.role)
+	end,
+	GUILD_ROLE_DELETE = function(d)
+		local members = popGuild(d).roles
+		DS.add(members,d.role_id)
+	end,
+	
+}
+
+
+ws_client:on_message(function(ws, msg)
+	local result = json.decode(msg)
+	if(result.t == "READY") then handle_ready(result) end
+	if result.d and events[result.t] then events[result.t](result.d) end
+end)
+
+ws_client:on_open(function()
+	print("WS CONNECTED!")
+	local payload = json.encode({
+		op = 2,
+		d = 
+		{
+			v = 3,
+			token = wstoken,
+			properties =
+			{
+				["$os"] = require('ffi').os,
+				["$browser"] = "",
+				["$device"] = "",
+				["$referrer"] = "",
+				["$referring_domain"] = ""
+			}
+		}
+	})
+	ws_client:send(payload)
+end)
+
+
 --- Starts the Client loop.
---- (Does nothing of real use at the moment, will interact with WebSockets in the future)
 function Client:run()
 
 	if self.isLoggedIn then
-
-		while true do
-			
-			if self.callbacks.think then self.callbacks.think() end
-
-		end
-
+		clientinstance = self
+		local gateway = self:getGateway()
+		gateway = gateway:gsub("wss", "ws")
+		print("Logged in as " .. self:getCurrentUser().username)
+		wstoken = self.token
+		ws_client:connect(gateway)
+		
+		
+		ev.Loop.default:loop()
+	else
+		print("WARNING: TRIED TO EXECUTE run() WITHOUT BEING LOGGED IN")
 	end
 
 end
+
+
 
 return Client

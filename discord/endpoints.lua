@@ -30,6 +30,7 @@ endp.register 	= endp.apiBase .. '/auth/register'
 endp.login 		= endp.apiBase .. '/auth/login'
 endp.logout 	= endp.apiBase .. '/auth/logout'
 endp.servers 	= endp.apiBase .. '/guilds'
+endp.invites 	= endp.apiBase .. "/invite"
 endp.channels 	= endp.apiBase .. '/channels'
 
 return endp
